@@ -11,6 +11,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
 // Os títulos já estão em sankhya_financeiro_unificado; a regra que liga título a contrato roda no
 // Postgres (view ciclo_contratos_titulos). Mesma lógica do sync-ciclo-contratos-local.js:
 // carga completa, upsert por chave natural e remoção do que não veio (synced_at anterior ao início).
+// Baixa as 6 tabelas antes de gravar e aborta sem alterar nada se alguma vier vazia ou com menos
+// da metade das linhas atuais (mesma proteção da sync-financeiro-unificado).
 // ==============================================================================
 
 const corsHeaders = {
@@ -23,6 +25,9 @@ const PAGE_SIZE = 1000;
 const CHUNK = 500;
 const MAX_TENTATIVAS = 5;
 const ORCAMENTO_MS = 120_000;
+// Se o Sankhya devolver menos da metade das linhas que já temos numa tabela, a API retornou
+// parcial. Abortamos antes de gravar qualquer tabela em vez de apagar cadastro bom.
+const PROPORCAO_MINIMA_REMOTA = 0.5;
 
 const SQL_CONTRATOS = `
   SELECT c.NUMCONTRATO, c.CODEMP, e.NOMEFANTASIA AS EMPRESA, c.CODPARC, p.NOMEPARC AS PARCEIRO,
@@ -193,8 +198,17 @@ serve(async (req: Request) => {
       return Array.from(mapa.values());
     }
 
+    async function validarVolume(tabela: string, recebidas: number) {
+      if (recebidas === 0) throw new Error(`O Sankhya não retornou nenhuma linha para ${tabela}. Nada foi alterado.`);
+      const { count, error } = await supabase.from(tabela).select('*', { count: 'exact', head: true });
+      if (error) throw new Error(`Erro ao contar ${tabela}: ${error.message}`);
+      const minimoEsperado = Math.floor((count ?? 0) * PROPORCAO_MINIMA_REMOTA);
+      if (recebidas < minimoEsperado) {
+        throw new Error(`Retorno suspeito da API em ${tabela}: ${recebidas} linhas recebidas contra ${count} existentes (mínimo aceito: ${minimoEsperado}). Nada foi alterado.`);
+      }
+    }
+
     async function gravarTabela(tabela: string, linhas: Record<string, any>[], onConflict: string, colunaSelect: string) {
-      if (linhas.length === 0) throw new Error(`O Sankhya não retornou nenhuma linha para ${tabela}. Nada foi alterado.`);
       for (let i = 0; i < linhas.length; i += CHUNK) {
         const { error } = await supabase.from(tabela).upsert(linhas.slice(i, i + CHUNK), { onConflict });
         if (error) throw new Error(`Erro ao gravar ${tabela}: ${error.message}`);
@@ -233,7 +247,6 @@ serve(async (req: Request) => {
       })),
       l => String(l.numcontrato)
     );
-    await gravarTabela('sankhya_contratos', contratos, 'numcontrato', 'numcontrato');
 
     // ---- AD_TCSCONCENCUS ----
     const cencus = unicos(
@@ -246,7 +259,6 @@ serve(async (req: Request) => {
       })),
       l => `${l.numcontrato}|${l.codtcsconcencus}`
     );
-    await gravarTabela('sankhya_contratos_cencus', cencus, 'numcontrato,codtcsconcencus', 'numcontrato');
 
     // ---- AD_TCSCONCENCUSRUB ----
     const rubricas = unicos(
@@ -260,7 +272,6 @@ serve(async (req: Request) => {
       })),
       l => `${l.numcontrato}|${l.codtcsconcencus}|${l.codtcsconcencusrub}`
     );
-    await gravarTabela('sankhya_contratos_rubricas', rubricas, 'numcontrato,codtcsconcencus,codtcsconcencusrub', 'numcontrato');
 
     // ---- AD_TCSCONCENCUSRUBNAT ----
     const naturezas = unicos(
@@ -277,7 +288,6 @@ serve(async (req: Request) => {
         })),
       l => `${l.numcontrato}|${l.codtcsconcencus}|${l.codtcsconcencusrub}|${l.codtcsconcencusrubnat}`
     );
-    await gravarTabela('sankhya_contratos_rubricas_naturezas', naturezas, 'numcontrato,codtcsconcencus,codtcsconcencusrub,codtcsconcencusrubnat', 'numcontrato');
 
     // ---- AD_TCSCONCENCUSRUBPLA ----
     const planejado = unicos(
@@ -295,7 +305,6 @@ serve(async (req: Request) => {
         })),
       l => `${l.numcontrato}|${l.codtcsconcencus}|${l.codtcsconcencusrub}|${l.codtcsconcencusrubpla}`
     );
-    await gravarTabela('sankhya_contratos_planejado', planejado, 'numcontrato,codtcsconcencus,codtcsconcencusrub,codtcsconcencusrubpla', 'numcontrato');
 
     // ---- AD_RUBRICA ----
     const adRubricas = unicos(
@@ -308,7 +317,19 @@ serve(async (req: Request) => {
       })),
       l => String(l.codrubrica)
     );
-    await gravarTabela('sankhya_rubricas', adRubricas, 'codrubrica', 'codrubrica');
+
+    // Só grava depois de baixar e validar as 6 tabelas: um retorno suspeito em qualquer uma
+    // aborta a carga inteira sem tocar em nenhuma.
+    const cargas: [string, Record<string, any>[], string, string][] = [
+      ['sankhya_contratos', contratos, 'numcontrato', 'numcontrato'],
+      ['sankhya_contratos_cencus', cencus, 'numcontrato,codtcsconcencus', 'numcontrato'],
+      ['sankhya_contratos_rubricas', rubricas, 'numcontrato,codtcsconcencus,codtcsconcencusrub', 'numcontrato'],
+      ['sankhya_contratos_rubricas_naturezas', naturezas, 'numcontrato,codtcsconcencus,codtcsconcencusrub,codtcsconcencusrubnat', 'numcontrato'],
+      ['sankhya_contratos_planejado', planejado, 'numcontrato,codtcsconcencus,codtcsconcencusrub,codtcsconcencusrubpla', 'numcontrato'],
+      ['sankhya_rubricas', adRubricas, 'codrubrica', 'codrubrica'],
+    ];
+    for (const [tabela, linhas] of cargas) await validarVolume(tabela, linhas.length);
+    for (const [tabela, linhas, onConflict, colunaSelect] of cargas) await gravarTabela(tabela, linhas, onConflict, colunaSelect);
 
     const receita = contratos.filter(c => c.recdesp === 1 && c.codemp !== 8);
     const segundos = Math.round((Date.now() - inicio) / 1000);
