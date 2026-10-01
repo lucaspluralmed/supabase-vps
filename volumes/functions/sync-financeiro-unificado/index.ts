@@ -353,13 +353,11 @@ serve(async (req: Request) => {
     // qualquer competência, exceto saldos bancários (TGFSBC não tem DTALTER e é tratado pela
     // carga por janela / sync-saldo-bancario). Upsert direto na principal pela hash_id
     // (origem_id, estável): idempotente. Depois remove da base os títulos apagados no Sankhya
-    // desde o corte (TGFFIN_EXC). Não zera sync_logs; guarda 2 dias dos próprios logs.
+    // desde o corte (TGFFIN_EXC). Como todo fluxo, começa zerando sync_logs.
     if (modoIncremental) {
       const corte = calcularDataCorte(1);
-      await supabase.from('sync_logs')
-        .delete()
-        .eq('sync_type', 'unificado_incremental')
-        .lt('created_at', new Date(Date.now() - 2 * 86_400_000).toISOString());
+      const { error: limpaLogs } = await supabase.from('sync_logs').delete().gte('created_at', '1970-01-01');
+      if (limpaLogs) console.warn(`[WARN] Não foi possível limpar sync_logs: ${limpaLogs.message}`);
       await writeLog(`Incremental: buscando alterações e baixas desde ${corte}...`);
 
       const filtroIncremental = `(DTALTER >= TO_DATE('${corte}', 'YYYY-MM-DD') OR DATA_BAIXA >= TO_DATE('${corte}', 'YYYY-MM-DD'))

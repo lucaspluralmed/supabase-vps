@@ -127,6 +127,11 @@ serve(async (req: Request) => {
       }
     }
 
+    // Toda execução (manual ou cron) começa com a tabela de logs zerada: o modal mostra só a carga atual
+    {
+      const { error: limpaLogs } = await supabase.from('sync_logs').delete().gte('created_at', '1970-01-01');
+      if (limpaLogs) console.warn(`[WARN] Não foi possível limpar sync_logs: ${limpaLogs.message}`);
+    }
     await writeLog(`Iniciando sincronização DFC Sankhya (Modo: ${mode})...`, 'info');
 
     let totalInserted = 0;

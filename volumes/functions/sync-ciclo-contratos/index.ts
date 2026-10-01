@@ -218,6 +218,11 @@ serve(async (req: Request) => {
       return removidos?.length ?? 0;
     }
 
+    // Toda execução (manual ou cron) começa com a tabela de logs zerada: o modal mostra só a carga atual
+    {
+      const { error: limpaLogs } = await supabase.from('sync_logs').delete().gte('created_at', '1970-01-01');
+      if (limpaLogs) console.warn(`[WARN] Não foi possível limpar sync_logs: ${limpaLogs.message}`);
+    }
     await writeLog('Ciclo dos contratos: baixando cadastro de contratos do Sankhya...');
 
     // ---- TCSCON ----

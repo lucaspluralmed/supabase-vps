@@ -139,6 +139,11 @@ serve(async (req: Request) => {
       throw new Error(`API do Sankhya falhou após ${MAX_TENTATIVAS} tentativas: ${ultimoErro}`);
     }
 
+    // Toda execução (manual ou cron) começa com a tabela de logs zerada: o modal mostra só a carga atual
+    {
+      const { error: limpaLogs } = await supabase.from('sync_logs').delete().gte('created_at', '1970-01-01');
+      if (limpaLogs) console.warn(`[WARN] Não foi possível limpar sync_logs: ${limpaLogs.message}`);
+    }
     await writeLog('Saldos bancários: baixando VW_SALDO_BANCARIO do Sankhya...');
 
     // ---------------- Baixar tudo ----------------
